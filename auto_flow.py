@@ -180,12 +180,81 @@ def enter_prompt(page: Page, prompt: str):
         "[aria-label*='prompt' i]",
     ]:
         el = page.query_selector(sel)
+        if not el:
+            continue
+        try:
+            # Scroll into view first, then fill without requiring a click
+            el.scroll_into_view_if_needed()
+            el.fill(prompt)
+            print("  Prompt entered")
+            return
+        except Exception:
+            try:
+                # Force-type via JS as last resort
+                el.evaluate(f"e => {{ e.value = {repr(prompt)}; e.dispatchEvent(new Event('input', {{bubbles:true}})); }}")
+                print("  Prompt entered (via JS)")
+                return
+            except Exception:
+                continue
+    print("  Warning: prompt field not found.")
+
+
+def add_images_as_ingredients(page: Page, count: int = 2):
+    """
+    Click the '+' (add_2) button to open the media-picker dialog,
+    then select the first `count` uploaded images as model ingredients.
+    """
+    # Click the '+' / Create button (add_2 icon, aria-haspopup=dialog)
+    _click(
+        page,
+        "button[aria-haspopup='dialog']:has(i:has-text('add_2'))",
+        "+ (add ingredients) button",
+    )
+
+    # Wait for the picker dialog to open
+    page.wait_for_selector("[role='dialog'], [data-state='open']",
+                           state="visible", timeout=10_000)
+    page.wait_for_timeout(800)
+
+    # Re-query thumbnails after each click — dialog re-renders on selection
+    thumb_sel = (
+        "[role='dialog'] img, "
+        "[data-state='open'] img, "
+        "[role='dialog'] [role='checkbox'], "
+        "[role='dialog'] [role='option']"
+    )
+
+    for i in range(count):
+        # Fresh query every iteration so references are never stale
+        thumbs = [t for t in page.query_selector_all(thumb_sel) if t.is_visible()]
+        if not thumbs:
+            raise RuntimeError(f"No image thumbnails found in picker (selecting image {i+1}).")
+        # Click the next unselected thumbnail (index i, or always [0] if list shrinks)
+        idx = min(i, len(thumbs) - 1)
+        thumbs[idx].scroll_into_view_if_needed()
+        thumbs[idx].click()
+        print(f"  Selected image {i + 1} as ingredient")
+        page.wait_for_timeout(600)
+
+    # Confirm / close the dialog — look for a confirm/done button
+    for confirm_sel in [
+        "button:has-text('Done')",
+        "button:has-text('Xong')",
+        "button:has-text('Confirm')",
+        "button:has-text('Add')",
+        "button:has-text('Select')",
+        "button:has-text('Thêm')",
+        "[role='dialog'] button[type='submit']",
+    ]:
+        el = page.query_selector(confirm_sel)
         if el and el.is_visible():
             el.click()
-            el.fill(prompt)
-            print(f"  Prompt entered")
+            print(f"  Confirmed selection ({confirm_sel})")
+            page.wait_for_timeout(800)
             return
-    print("  Warning: prompt field not found.")
+
+    # No confirm button — dialog may close on selection
+    print("  No confirm button found — assuming dialog closed on selection.")
 
 
 def click_generate(page: Page):
@@ -316,7 +385,10 @@ def run(begin_image: str, end_image: str, prompt: str,
         enter_prompt(page, prompt)
         page.wait_for_timeout(500)
 
-        print("[8] Generating video...")
+        print("[8] Adding uploaded images as ingredients...")
+        add_images_as_ingredients(page, count=2)
+
+        print("[9] Generating video...")
         click_generate(page)
         page.wait_for_timeout(2000)
 
