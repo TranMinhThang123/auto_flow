@@ -2,6 +2,10 @@
 
 Automate image upload and AI video generation on [Google Labs Flow](https://labs.google/flow/about) using Playwright browser automation.
 
+## Demo
+
+<video src="demo.webm" controls width="100%"></video>
+
 ## What it does
 
 Given two images (a start frame and an end frame) and a text prompt, the script will:
