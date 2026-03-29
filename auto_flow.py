@@ -5,9 +5,8 @@ First-time setup (login once, session saved forever):
     python auto_flow.py --login
 
 Normal usage:
-    python auto_flow.py --begin start.jpg --end end.jpg
     python auto_flow.py --begin start.jpg --end end.jpg --prompt "smooth pan"
-    python auto_flow.py --begin start.jpg --end end.jpg --headless
+    python auto_flow.py --begin start.jpg --end end.jpg --prompt "zoom in" --headless
 """
 
 import argparse
@@ -23,219 +22,19 @@ except ImportError:
 
 
 FLOW_ABOUT_URL   = "https://labs.google/flow/about"
-FLOW_PROJECT_URL = "https://labs.google/fx/vi/tools/flow/project/f0c44c0c-8cde-4d6a-bcb0-7099821065ab"
-DEFAULT_TIMEOUT = 60_000   # 60 s
-SIGN_IN_TIMEOUT = 300_000  # 5 min for manual sign-in
-GEN_TIMEOUT     = 300_000  # 5 min for video generation
+FLOW_PROJECT_URL = "https://labs.google/fx/tools/flow/project/87eb7f9c-c354-4d1a-8f40-7708de1466a6"
+DEFAULT_TIMEOUT  = 60_000   # 60 s
+SIGN_IN_TIMEOUT  = 300_000  # 5 min for manual sign-in
+GEN_TIMEOUT      = 300_000  # 5 min for video generation
 
-# Persistent profile dir — login cookies are saved here so you only sign in once
 PROFILE_DIR = Path(__file__).parent / ".browser_profile"
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
 
-def dismiss_dialogs(page: Page):
-    """Dismiss cookie consent or any blocking overlay."""
-    for sel in [
-        "button:has-text('Accept all')",
-        "button:has-text('Chấp nhận tất cả')",
-        "button:has-text('I agree')",
-        "button:has-text('Đồng ý')",
-        "button:has-text('Got it')",
-    ]:
-        try:
-            el = page.query_selector(sel)
-            if el and el.is_visible():
-                el.click()
-                print(f"  Dismissed dialog: {sel}")
-                page.wait_for_timeout(800)
-        except Exception:
-            pass
-
-
-def ensure_signed_in(page: Page):
-    """Pause and wait for the user to sign in if redirected to Google login."""
-    if "accounts.google.com" in page.url or page.query_selector("text=Sign in"):
-        print("\n  *** Google sign-in required ***")
-        print("  Please sign in manually in the browser window.")
-        print("  Tip: run  python auto_flow.py --login  once to save your session.")
-        print("  Waiting up to 5 minutes for you to complete sign-in...")
-        page.wait_for_url("**/tools/flow**", timeout=SIGN_IN_TIMEOUT)
-        page.wait_for_timeout(2000)
-        print("  Signed in — continuing.\n")
-
-
-def _get_file_inputs(page: Page):
-    """Return all file inputs on the page, including hidden ones."""
-    return page.query_selector_all("input[type='file']")
-
-
-def upload_begin_image(page: Page, image_path: str):
-    """Upload the BEGIN (start) frame.
-
-    The file input is always hidden — use state='attached', not 'visible'.
-    Click 'Thêm nội dung nghe nhìn' (Add media) to activate the slot first,
-    then set files directly on the hidden input.
-    """
-    abs_path = str(Path(image_path).resolve())
-
-    # Click the "Add media" button to activate the begin upload slot
-    for sel in [
-        "button[aria-label='Thêm nội dung nghe nhìn']",
-        "button[aria-label*='media' i]",
-        "button[aria-label*='Add' i]",
-    ]:
-        el = page.query_selector(sel)
-        if el and el.is_visible():
-            el.click()
-            print(f"  Clicked add-media button ({sel})")
-            page.wait_for_timeout(500)
-            break
-
-    # Wait for the hidden input to exist in the DOM (not visible — always hidden)
-    page.wait_for_selector("input[type='file']", state="attached", timeout=DEFAULT_TIMEOUT)
-
-    inputs = _get_file_inputs(page)
-    if not inputs:
-        raise RuntimeError("No file inputs found on the page.")
-
-    inputs[0].set_input_files(abs_path)
-    print(f"  Uploaded begin image: {abs_path}")
-    page.wait_for_timeout(2000)
-
-
-
-def upload_end_image(page: Page, image_path: str):
-    """Upload the END (finish) frame.
-
-    Button [9] 'add_2 / Tạo' activates the end frame slot.
-    Then set_input_files injects the file into the shared hidden input.
-    """
-    abs_path = str(Path(image_path).resolve())
-
-    # Click the "add_2 / Tạo" button — this is the end-frame add button
-    clicked = False
-    for sel in [
-        "button[aria-label='Tạo']",
-        "button[aria-label*='Tạo' i]",
-        "button[aria-label*='create' i]",
-        "button[aria-label*='add' i]",
-    ]:
-        els = page.query_selector_all(sel)
-        # Pick the one that is NOT the generate (arrow_forward) button
-        for el in els:
-            if el.is_visible():
-                label = el.get_attribute("aria-label") or ""
-                icon  = el.inner_text() or ""
-                # Skip the generate/forward button
-                if "arrow_forward" in icon or "arrow_forward" in label:
-                    continue
-                el.click()
-                print(f"  Clicked end-frame button ({sel}: '{label}')")
-                page.wait_for_timeout(500)
-                clicked = True
-                break
-        if clicked:
-            break
-
-    if not clicked:
-        print("  Warning: end-frame button not found, trying direct input set...")
-
-    inputs = _get_file_inputs(page)
-    if not inputs:
-        raise RuntimeError("No file inputs found after clicking end-frame button.")
-
-    inputs[-1].set_input_files(abs_path)
-    print(f"  Uploaded end image: {abs_path}")
-    page.wait_for_timeout(2000)
-
-
-def enter_prompt(page: Page, prompt: str):
-    """Type the optional text prompt into the prompt field."""
-    for sel in [
-        "textarea",
-        "[contenteditable='true']",
-        "input[type='text'][placeholder*='prompt' i]",
-        "input[type='text'][placeholder*='describe' i]",
-        "[aria-label*='prompt' i]",
-        "[placeholder*='mô tả' i]",
-    ]:
-        try:
-            el = page.query_selector(sel)
-            if el and el.is_visible():
-                el.click()
-                el.fill(prompt)
-                print(f"  Prompt entered ({sel})")
-                return
-        except Exception:
-            pass
-    print("  Warning: prompt field not found — skipping.")
-
-
-def click_generate(page: Page):
-    """Click the generate button — button[11] 'arrow_forward - Tạo'."""
-    # Find all visible buttons, pick the one with arrow_forward icon
-    buttons = page.query_selector_all("button, [role='button']")
-    for el in buttons:
-        if not el.is_visible():
-            continue
-        try:
-            text = el.inner_text()
-            label = el.get_attribute("aria-label") or ""
-            if "arrow_forward" in text or "arrow_forward" in label:
-                el.click()
-                print(f"  Generate clicked (arrow_forward button)")
-                return
-        except Exception:
-            pass
-
-    # Fallback to text-based selectors
-    for sel in [
-        "button[aria-label='Tạo']:has-text('arrow_forward')",
-        "button:has-text('Generate')",
-        "button:has-text('Tạo video')",
-        "[data-testid*='generate']",
-        "button[type='submit']",
-    ]:
-        el = page.query_selector(sel)
-        if el and el.is_visible() and el.is_enabled():
-            el.click()
-            print(f"  Generate clicked ({sel})")
-            return
-
-    raise RuntimeError("Could not find the Generate button.")
-
-
-def wait_for_video(page: Page) -> str:
-    """Poll until a video element or download link appears, then return its URL."""
-    print("  Waiting for video (up to 5 min)...")
-    deadline = time.time() + GEN_TIMEOUT / 1000
-    while time.time() < deadline:
-        for sel in ["video", "a[href*='.mp4']", "a[download]",
-                    "button:has-text('Download')", "button:has-text('Tải xuống')",
-                    "[data-testid*='video']", "[class*='video-result']"]:
-            el = page.query_selector(sel)
-            if el and el.is_visible():
-                print("  Video ready!")
-                tag = el.evaluate("e => e.tagName.toLowerCase()")
-                if tag == "video":
-                    src = el.get_attribute("src") or el.get_attribute("data-src")
-                    return src or "VIDEO_ELEMENT_VISIBLE"
-                if tag == "a":
-                    return el.get_attribute("href") or "DOWNLOAD_LINK_VISIBLE"
-                return "VIDEO_READY"
-        time.sleep(3)
-    raise RuntimeError("Video generation timed out after 5 minutes.")
-
-
-# ─── browser context (persistent profile) ────────────────────────────────────
+# ─── browser helpers ───────────────────────────────────────────────────────────
 
 def _launch_context(p, headless: bool):
-    """
-    Launch a persistent browser context that saves cookies/session to PROFILE_DIR.
-    This means you only need to sign in once — subsequent runs reuse the session.
-    """
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    context = p.chromium.launch_persistent_context(
+    return p.chromium.launch_persistent_context(
         user_data_dir=str(PROFILE_DIR),
         headless=headless,
         viewport={"width": 1280, "height": 900},
@@ -246,77 +45,21 @@ def _launch_context(p, headless: bool):
         ),
         args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
     )
-    return context
 
 
-# ─── login helper ─────────────────────────────────────────────────────────────
-
-def login():
-    """
-    Walk through the full first-time flow:
-      1. Open labs.google/flow/about
-      2. Click "Create with Flow"
-      3. Accept ToS popup
-      4. Sign in to Google account
-    Session is saved in PROFILE_DIR — no login needed on future runs.
-    """
-    print("\n=== First-time Login Setup ===")
-    print(f"Profile will be saved to: {PROFILE_DIR}")
-    print("Follow the steps in the browser window that opens.\n")
-
-    with sync_playwright() as p:
-        context = _launch_context(p, headless=False)
-        page = context.new_page()
-
-        # Step 1: go to the about/landing page
-        print("[1] Opening labs.google/flow/about ...")
-        page.goto(FLOW_ABOUT_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT)
-        page.wait_for_timeout(2000)
-
-        # Step 2: wait for and click "Create with Flow" button
-        print("[2] Waiting for 'Create with Flow' button...")
-        try:
-            el = page.wait_for_selector(
-                "a:has-text('Create with Flow'), button:has-text('Create with Flow')",
-                timeout=DEFAULT_TIMEOUT,
-                state="visible",
-            )
-            el.click()
-            print("  Clicked 'Create with Flow'")
-        except Exception:
-            print("  Button not found — please click 'Create with Flow' manually.")
-
-        page.wait_for_timeout(1500)
-
-        # Step 3: accept ToS popup if it appears
-        print("[3] Looking for Terms of Service popup...")
-        _accept_tos(page)
-
-        # Step 4: handle Google sign-in
-        print("[4] Waiting for Google sign-in...")
-        print("    Please sign in to your Google account in the browser.")
-        print("    The script will finish automatically once you reach the Flow editor.\n")
-        try:
-            page.wait_for_url("**/tools/flow**", timeout=SIGN_IN_TIMEOUT)
-            page.wait_for_timeout(1500)
-            print("\nLogin complete! Session saved.")
-            print("From now on, run:  python auto_flow.py --begin img1.jpg --end img2.jpg")
-        except Exception:
-            print("\nTimed out or browser closed. Session saved as-is.")
-        finally:
-            context.close()
+def _click(page: Page, selector: str, label: str, timeout: int = DEFAULT_TIMEOUT):
+    """Wait for a visible element then click it."""
+    el = page.wait_for_selector(selector, state="visible", timeout=timeout)
+    el.click()
+    print(f"  Clicked: {label}")
+    page.wait_for_timeout(800)
 
 
 def _accept_tos(page: Page):
-    """Accept ToS popup if present (tries each selector, skips if not found)."""
     for sel in [
-        "button:has-text('I agree')",
-        "button:has-text('Đồng ý')",
-        "button:has-text('Accept')",
-        "button:has-text('Chấp nhận')",
-        "button:has-text('Continue')",
-        "button:has-text('Tiếp tục')",
-        "button:has-text('Agree')",
+        "button:has-text('I agree')", "button:has-text('Đồng ý')",
+        "button:has-text('Accept')",  "button:has-text('Chấp nhận')",
+        "button:has-text('Continue')", "button:has-text('Agree')",
     ]:
         try:
             el = page.wait_for_selector(sel, timeout=3000, state="visible")
@@ -329,93 +72,251 @@ def _accept_tos(page: Page):
             pass
 
 
-def _open_flow_editor(page: Page):
-    """Go directly to the project URL, accept ToS if shown, handle expired session."""
-    print(f"  Navigating to project: {FLOW_PROJECT_URL}")
+def _ensure_signed_in(page: Page):
+    if "accounts.google.com" in page.url or page.query_selector("text=Sign in"):
+        print("\n  *** Google sign-in required — please sign in in the browser ***")
+        print("  Tip: run  python auto_flow.py --login  once to save your session.")
+        page.wait_for_url("**/tools/flow**", timeout=SIGN_IN_TIMEOUT)
+        page.wait_for_timeout(2000)
+        print("  Signed in.\n")
+
+
+def _open_editor(page: Page):
+    print(f"  Navigating to: {FLOW_PROJECT_URL}")
     page.goto(FLOW_PROJECT_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT)
     page.wait_for_timeout(2000)
-
-    # Session expired → sign in again
-    ensure_signed_in(page)
-
-    # Accept ToS if it pops up after navigation
+    _ensure_signed_in(page)
     _accept_tos(page)
-
     page.wait_for_timeout(1500)
-    print("  Flow editor loaded.")
+    print("  Editor loaded.")
 
 
-# ─── main flow ────────────────────────────────────────────────────────────────
+# ─── step functions ────────────────────────────────────────────────────────────
 
-def debug_page(page: Page, label: str = ""):
-    """Print all file inputs and visible buttons, and save a screenshot."""
-    shot = Path(f"debug_{label or 'screenshot'}.png")
+def upload_media(page: Page, image_path: str, label: str):
+    """
+    Upload a single image to the project media library via the
+    'Thêm nội dung nghe nhìn' (Add media) button.
+    Does NOT interact with Start/End frame slots.
+    """
+    abs_path = str(Path(image_path).resolve())
+
+    # The button's inner text is "add\nThêm nội dung nghe nhìn" (icon + hidden span)
+    # Use :has-text() which matches against innerText content
+    add_sel = (
+        "button:has-text('Thêm nội dung nghe nhìn'), "
+        "button:has-text('Add media')"
+    )
+    _click(page, add_sel, f"Add media ({label})")
+    page.wait_for_timeout(400)
+
+    # Inject the file into the hidden input
+    page.wait_for_selector("input[type='file']", state="attached", timeout=10_000)
+    inputs = page.query_selector_all("input[type='file']")
+    if not inputs:
+        raise RuntimeError(f"No file input found for {label}.")
+    inputs[0].set_input_files(abs_path)
+    print(f"  Uploaded {label}: {abs_path}")
+    # Wait for the thumbnail to appear before moving to next upload
+    page.wait_for_timeout(2500)
+
+
+def click_settings_button(page: Page):
+    """
+    Click the 'Video / crop_9_16 / x1' button that opens the generation settings panel.
+    Identified by: button[aria-haspopup='menu'] containing 'Video' text.
+    """
+    _click(
+        page,
+        "button[aria-haspopup='menu']:has-text('Video')",
+        "settings button (Video / crop_9_16 / x1)",
+    )
+
+
+def select_video_tab(page: Page):
+    """Click the 'Video' generation-type tab (role=tab, controls *-VIDEO)."""
+    # aria-controls ends with '-VIDEO' (not '-VIDEO_REFERENCES')
+    _click(
+        page,
+        "[role='tab'][aria-controls$='-VIDEO']",
+        "Video tab",
+    )
+
+
+def select_ingredients_tab(page: Page):
+    """Click the 'Ingredients' reference tab (controls *-VIDEO_REFERENCES)."""
+    _click(
+        page,
+        "[role='tab'][aria-controls$='-VIDEO_REFERENCES']",
+        "Ingredients tab",
+    )
+
+
+def select_ratio_9_16(page: Page):
+    """Click the 9:16 aspect-ratio tab (controls *-PORTRAIT)."""
+    _click(
+        page,
+        "[role='tab'][aria-controls$='-PORTRAIT']",
+        "9:16 ratio tab",
+    )
+
+
+def select_x1_scale(page: Page):
+    """Click the x1 scale tab."""
+    _click(
+        page,
+        "[role='tab']:has-text('x1')",
+        "x1 scale tab",
+    )
+
+
+def enter_prompt(page: Page, prompt: str):
+    """Fill the prompt textarea."""
+    for sel in [
+        "textarea",
+        "[contenteditable='true']",
+        "[placeholder*='prompt' i]",
+        "[placeholder*='mô tả' i]",
+        "[aria-label*='prompt' i]",
+    ]:
+        el = page.query_selector(sel)
+        if el and el.is_visible():
+            el.click()
+            el.fill(prompt)
+            print(f"  Prompt entered")
+            return
+    print("  Warning: prompt field not found.")
+
+
+def click_generate(page: Page):
+    """Click the arrow_forward generate button."""
+    _click(
+        page,
+        "button:has(i:has-text('arrow_forward'))",
+        "Generate (arrow_forward)",
+    )
+
+
+def wait_for_video(page: Page) -> str:
+    print("  Waiting for video (up to 5 min)...")
+    deadline = time.time() + GEN_TIMEOUT / 1000
+    while time.time() < deadline:
+        for sel in ["video", "a[href*='.mp4']", "a[download]",
+                    "button:has-text('Download')", "button:has-text('Tải xuống')"]:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                print("  Video ready!")
+                tag = el.evaluate("e => e.tagName.toLowerCase()")
+                if tag == "video":
+                    return el.get_attribute("src") or "VIDEO_ELEMENT_VISIBLE"
+                if tag == "a":
+                    return el.get_attribute("href") or "DOWNLOAD_LINK_VISIBLE"
+                return "VIDEO_READY"
+        time.sleep(3)
+    raise RuntimeError("Video generation timed out after 5 minutes.")
+
+
+# ─── debug helper ──────────────────────────────────────────────────────────────
+
+def debug_page(page: Page, label: str = "screenshot"):
+    shot = Path(f"debug_{label}.png")
     page.screenshot(path=str(shot))
-    print(f"\n  Screenshot: {shot.resolve()}")
-
-    inputs = _get_file_inputs(page)
-    print(f"  File inputs: {len(inputs)}")
-    for i, el in enumerate(inputs):
-        html = el.evaluate("e => e.outerHTML.slice(0, 120)")
-        print(f"    [{i}] visible={el.is_visible()} {html}")
-
-    buttons = page.query_selector_all("button, [role='button']")
-    visible = [b for b in buttons if b.is_visible()]
-    print(f"  Visible buttons: {len(visible)}")
-    for i, b in enumerate(visible):
+    print(f"\n[DEBUG] Screenshot: {shot.resolve()}")
+    buttons = [b for b in page.query_selector_all("button, [role='button'], [role='tab']") if b.is_visible()]
+    print(f"  Visible buttons/tabs: {len(buttons)}")
+    for i, b in enumerate(buttons):
         try:
-            txt = b.evaluate("e => (e.innerText || e.getAttribute('aria-label') || e.outerHTML).slice(0,80).trim()")
+            txt = b.evaluate("e => (e.innerText||e.getAttribute('aria-label')||'').slice(0,80).trim()")
             print(f"    [{i}] {txt}")
         except Exception:
             pass
 
 
-def run(begin_image: str, end_image: str, prompt: str = "",
+# ─── login helper ──────────────────────────────────────────────────────────────
+
+def login():
+    print("\n=== First-time Login Setup ===")
+    print(f"Profile: {PROFILE_DIR}\n")
+    with sync_playwright() as p:
+        context = _launch_context(p, headless=False)
+        page = context.new_page()
+        print("[1] Opening labs.google/flow/about ...")
+        page.goto(FLOW_ABOUT_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT)
+        page.wait_for_timeout(2000)
+        print("[2] Click 'Create with Flow' in the browser (or it may click automatically)...")
+        try:
+            el = page.wait_for_selector(
+                "a:has-text('Create with Flow'), button:has-text('Create with Flow')",
+                timeout=DEFAULT_TIMEOUT, state="visible",
+            )
+            el.click()
+        except Exception:
+            print("  Button not found — please click it manually.")
+        page.wait_for_timeout(1500)
+        _accept_tos(page)
+        print("[3] Please sign in to Google in the browser window...")
+        try:
+            page.wait_for_url("**/tools/flow**", timeout=SIGN_IN_TIMEOUT)
+            print("\nLogin complete! Session saved.")
+            print("Run: python auto_flow.py --begin img1.jpg --end img2.jpg --prompt 'your prompt'")
+        except Exception:
+            print("\nTimed out. Session saved as-is.")
+        finally:
+            context.close()
+
+
+# ─── main run ──────────────────────────────────────────────────────────────────
+
+def run(begin_image: str, end_image: str, prompt: str,
         headless: bool = False, debug: bool = False):
 
-    for path, label in [(begin_image, "begin"), (end_image, "end")]:
+    for path, lbl in [(begin_image, "begin"), (end_image, "end")]:
         if not Path(path).exists():
-            print(f"Error: {label} image not found: {path}")
+            print(f"Error: {lbl} image not found: {path}")
             sys.exit(1)
 
     print("\n=== Auto Flow AI ===")
     print(f"Begin  : {begin_image}")
     print(f"End    : {end_image}")
-    print(f"Prompt : {prompt or '(none)'}")
+    print(f"Prompt : {prompt}")
     print(f"Profile: {PROFILE_DIR}")
     print(f"Mode   : {'headless' if headless else 'headed'}")
     print("=" * 40)
 
     with sync_playwright() as p:
-        print("\n[1/6] Launching browser (persistent profile)...")
+        print("\n[1] Launching browser...")
         context = _launch_context(p, headless=headless)
         page = context.new_page()
 
-        print("[2/6] Opening Flow editor...")
-        _open_flow_editor(page)
-        dismiss_dialogs(page)
+        print("[2] Opening Flow editor...")
+        _open_editor(page)
 
         if debug:
-            print("\n[DEBUG] Page state after loading editor:")
-            debug_page(page)
+            debug_page(page, "after_open")
 
-        print("[3/6] Uploading BEGIN image...")
-        upload_begin_image(page, begin_image)
+        print("[3] Uploading BEGIN image...")
+        upload_media(page, begin_image, "begin")
+
+        print("[4] Uploading END image...")
+        upload_media(page, end_image, "end")
 
         if debug:
-            print("\n[DEBUG] Page state after begin upload:")
-            debug_page(page)
+            debug_page(page, "after_upload")
 
-        print("[4/6] Uploading END image...")
-        upload_end_image(page, end_image)
+        print("[5] Opening settings panel...")
+        click_settings_button(page)
 
-        if prompt:
-            print("[5/6] Entering prompt...")
-            enter_prompt(page, prompt)
-        else:
-            print("[5/6] No prompt — skipping.")
+        print("[6] Configuring generation settings...")
+        select_video_tab(page)
+        select_ingredients_tab(page)
+        select_ratio_9_16(page)
+        select_x1_scale(page)
 
-        print("[6/6] Generating video...")
+        print("[7] Entering prompt...")
+        enter_prompt(page, prompt)
+        page.wait_for_timeout(500)
+
+        print("[8] Generating video...")
         click_generate(page)
         page.wait_for_timeout(2000)
 
@@ -435,22 +336,25 @@ def main():
     parser = argparse.ArgumentParser(
         description="Upload begin/end images to Google Labs Flow and generate a video"
     )
-    parser.add_argument(
-        "--login", action="store_true",
-        help="Open browser for one-time Google sign-in (saves session for future runs)"
-    )
-    parser.add_argument("--begin",  help="Path to the BEGIN (start) frame image")
-    parser.add_argument("--end",    help="Path to the END (finish) frame image")
-    parser.add_argument("--prompt",   default="", help="Optional text prompt")
-    parser.add_argument("--headless", action="store_true", help="Run without a visible browser window")
-    parser.add_argument("--debug",    action="store_true", help="Save screenshots and dump page elements")
+    parser.add_argument("--login",    action="store_true",
+                        help="One-time Google sign-in (saves session)")
+    parser.add_argument("--begin",   help="Path to the BEGIN (start) frame image")
+    parser.add_argument("--end",     help="Path to the END (finish) frame image")
+    parser.add_argument("--prompt",  required=False, default="",
+                        help="Text prompt for video generation (required by Flow)")
+    parser.add_argument("--headless", action="store_true",
+                        help="Run without a visible browser window")
+    parser.add_argument("--debug",   action="store_true",
+                        help="Save screenshots and dump page elements for debugging")
     args = parser.parse_args()
 
     if args.login:
         login()
     else:
         if not args.begin or not args.end:
-            parser.error("--begin and --end are required (or use --login to set up sign-in)")
+            parser.error("--begin and --end are required (or use --login for first-time setup)")
+        if not args.prompt:
+            parser.error("--prompt is required (Google Flow needs a text prompt to generate video)")
         run(args.begin, args.end, args.prompt, args.headless, args.debug)
 
 
