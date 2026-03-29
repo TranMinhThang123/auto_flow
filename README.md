@@ -4,7 +4,7 @@ Automate image upload and AI video generation on [Google Labs Flow](https://labs
 
 ## Demo
 
-<video src="demo.webm" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/2573cb0b-a009-403c-824e-e5b3a1910f3f" controls width="100%"></video>
 
 ## What it does
 
