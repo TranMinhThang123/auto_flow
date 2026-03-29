@@ -1,5 +1,5 @@
 """
-Auto Flow AI - Automate begin/end image upload and video generation on Google Labs Flow
+Auto Flow AI - Automate image upload and video generation on Google Labs Flow
 
 First-time setup (login once, session saved forever):
     python auto_flow.py --login
@@ -22,10 +22,10 @@ except ImportError:
 
 
 FLOW_ABOUT_URL   = "https://labs.google/flow/about"
-FLOW_PROJECT_URL = "https://labs.google/fx/tools/flow/project/87eb7f9c-c354-4d1a-8f40-7708de1466a6"
-DEFAULT_TIMEOUT  = 60_000   # 60 s
-SIGN_IN_TIMEOUT  = 300_000  # 5 min for manual sign-in
-GEN_TIMEOUT      = 300_000  # 5 min for video generation
+FLOW_PROJECT_URL = "https://labs.google/fx/tools/flow/project/e7507ce7-6140-4e99-925f-d1a7c1baea0f"
+DEFAULT_TIMEOUT  = 60_000
+SIGN_IN_TIMEOUT  = 300_000
+GEN_TIMEOUT      = 300_000
 
 PROFILE_DIR = Path(__file__).parent / ".browser_profile"
 
@@ -47,14 +47,6 @@ def _launch_context(p, headless: bool):
     )
 
 
-def _click(page: Page, selector: str, label: str, timeout: int = DEFAULT_TIMEOUT):
-    """Wait for a visible element then click it."""
-    el = page.wait_for_selector(selector, state="visible", timeout=timeout)
-    el.click()
-    print(f"  Clicked: {label}")
-    page.wait_for_timeout(800)
-
-
 def _accept_tos(page: Page):
     for sel in [
         "button:has-text('I agree')", "button:has-text('Đồng ý')",
@@ -65,8 +57,7 @@ def _accept_tos(page: Page):
             el = page.wait_for_selector(sel, timeout=3000, state="visible")
             if el:
                 el.click()
-                print(f"  Accepted ToS ({sel})")
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(800)
                 return
         except Exception:
             pass
@@ -91,107 +82,180 @@ def _open_editor(page: Page):
     print("  Editor loaded.")
 
 
-# ─── step functions ────────────────────────────────────────────────────────────
+# ─── step 1 & 2: upload images ─────────────────────────────────────────────────
 
 def upload_media(page: Page, image_path: str, label: str):
-    """
-    Upload a single image to the project media library via the
-    'Thêm nội dung nghe nhìn' (Add media) button.
-    Does NOT interact with Start/End frame slots.
-    """
+    """Upload one image via the Add Media button → hidden file input."""
     abs_path = str(Path(image_path).resolve())
 
-    # The button's inner text is "add\nThêm nội dung nghe nhìn" (icon + hidden span)
-    # Use :has-text() which matches against innerText content
-    add_sel = (
-        "button:has-text('Thêm nội dung nghe nhìn'), "
-        "button:has-text('Add media')"
+    add_btn = page.wait_for_selector(
+        "button[aria-label='Add Media'], button[aria-label='Thêm nội dung nghe nhìn'], "
+        "button:has-text('Add Media'), button:has-text('Thêm nội dung nghe nhìn')",
+        state="visible", timeout=DEFAULT_TIMEOUT,
     )
-    _click(page, add_sel, f"Add media ({label})")
+    add_btn.click()
     page.wait_for_timeout(400)
 
-    # Inject the file into the hidden input
     page.wait_for_selector("input[type='file']", state="attached", timeout=10_000)
     inputs = page.query_selector_all("input[type='file']")
     if not inputs:
         raise RuntimeError(f"No file input found for {label}.")
     inputs[0].set_input_files(abs_path)
     print(f"  Uploaded {label}: {abs_path}")
-    # Wait for the thumbnail to appear before moving to next upload
     page.wait_for_timeout(2500)
 
 
-def click_settings_button(page: Page):
+# ─── step 3: open settings panel ──────────────────────────────────────────────
+
+def open_settings_panel(page: Page):
+    """Click the Video/crop_9_16/x1 settings button.
+
+    The button text varies ('Video', '🍌 Nano Banana 2', etc.) but it always
+    contains an <i>crop_9_16</i> icon — that's the stable unique marker.
+    Press Escape first to close any open menu.
     """
-    Click the 'Video / crop_9_16 / x1' button that opens the generation settings panel.
-    Identified by: button[aria-haspopup='menu'] containing 'Video' text.
-    """
-    _click(
-        page,
-        "button[aria-haspopup='menu']:has-text('Video')",
-        "settings button (Video / crop_9_16 / x1)",
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+
+    btn = page.wait_for_selector(
+        "button:has(i:has-text('crop_9_16'))",
+        state="visible", timeout=DEFAULT_TIMEOUT,
+    )
+    btn.click()
+    print("  Opened settings panel")
+    page.wait_for_timeout(1000)
+
+
+# ─── step 4: configure tabs ────────────────────────────────────────────────────
+
+def _click_tab(page: Page, label: str, *selectors: str):
+    """Try each selector; save a screenshot and raise if all fail."""
+    for sel in selectors:
+        try:
+            el = page.wait_for_selector(sel, state="visible", timeout=8_000)
+            el.click()
+            print(f"  Selected tab: {label}")
+            page.wait_for_timeout(600)
+            return
+        except Exception:
+            continue
+    shot = Path("debug_tab_fail.png")
+    page.screenshot(path=str(shot), full_page=True)
+    raise RuntimeError(
+        f"Tab '{label}' not found. Screenshot: {shot.resolve()}\nTried: {selectors}"
     )
 
 
 def select_video_tab(page: Page):
-    """Click the 'Video' generation-type tab (role=tab, controls *-VIDEO)."""
-    # aria-controls ends with '-VIDEO' (not '-VIDEO_REFERENCES')
-    _click(
-        page,
-        "[role='tab'][aria-controls$='-VIDEO']",
-        "Video tab",
+    _click_tab(
+        page, "Video",
+        # Stable: class flow_tab_slider_trigger + text Video (not Ingredients)
+        ".flow_tab_slider_trigger:has-text('Video'):not(:has-text('Ingredients')):not(:has-text('Image'))",
+        "[role='tab'].flow_tab_slider_trigger:has-text('Video')",
+        "[role='tab'][aria-controls*='-VIDEO']:not([aria-controls*='REFERENCES'])",
+        "[role='tab']:has(i:has-text('videocam'))",
     )
 
 
 def select_ingredients_tab(page: Page):
-    """Click the 'Ingredients' reference tab (controls *-VIDEO_REFERENCES)."""
-    _click(
-        page,
-        "[role='tab'][aria-controls$='-VIDEO_REFERENCES']",
-        "Ingredients tab",
+    _click_tab(
+        page, "Ingredients",
+        ".flow_tab_slider_trigger:has-text('Ingredients')",
+        "[role='tab'].flow_tab_slider_trigger:has-text('Ingredients')",
+        "[role='tab'][aria-controls*='VIDEO_REFERENCES']",
+        "[role='tab']:has(i:has-text('chrome_extension'))",
     )
 
 
-def select_ratio_9_16(page: Page):
-    """Click the 9:16 aspect-ratio tab (controls *-PORTRAIT)."""
-    _click(
-        page,
-        "[role='tab'][aria-controls$='-PORTRAIT']",
-        "9:16 ratio tab",
+def select_9_16_tab(page: Page):
+    _click_tab(
+        page, "9:16",
+        ".flow_tab_slider_trigger:has-text('9:16')",
+        "[role='tab'].flow_tab_slider_trigger:has-text('9:16')",
+        "[role='tab'][aria-controls*='PORTRAIT']",
+        "[role='tab']:has(i:has-text('crop_9_16'))",
     )
 
 
-def select_x1_scale(page: Page):
-    """Click the x1 scale tab."""
-    _click(
-        page,
-        "[role='tab']:has-text('x1')",
-        "x1 scale tab",
+def select_x1_tab(page: Page):
+    _click_tab(
+        page, "x1",
+        ".flow_tab_slider_trigger:has-text('x1')",
+        "[role='tab'].flow_tab_slider_trigger:has-text('x1')",
+        "[role='tab'][aria-controls*='-1']",
     )
 
+
+# ─── step 5: add images as ingredients ────────────────────────────────────────
+
+def _pick_ingredient(page: Page, n: int):
+    """Open the '+' picker and select the first available thumbnail."""
+    plus_btn = page.wait_for_selector(
+        "button[aria-haspopup='dialog']:has(i:has-text('add_2'))",
+        state="visible", timeout=10_000,
+    )
+    plus_btn.click()
+    print(f"  Clicked + button (ingredient {n})")
+
+    page.wait_for_selector(
+        "[role='dialog'], [data-state='open']",
+        state="visible", timeout=10_000,
+    )
+    page.wait_for_timeout(800)
+
+    thumb_sel = (
+        "[role='dialog'] img, [data-state='open'] img, "
+        "[role='dialog'] [role='option'], [role='dialog'] [role='checkbox']"
+    )
+    thumbs = [t for t in page.query_selector_all(thumb_sel) if t.is_visible()]
+    if not thumbs:
+        raise RuntimeError(f"No thumbnails in picker for ingredient {n}.")
+
+    thumbs[0].scroll_into_view_if_needed()
+    thumbs[0].click()
+    print(f"  Selected ingredient {n}")
+    page.wait_for_timeout(600)
+
+    # Close dialog if still open
+    for confirm_sel in [
+        "button:has-text('Done')", "button:has-text('Xong')",
+        "button:has-text('Confirm')", "button:has-text('Thêm')",
+        "[role='dialog'] button[type='submit']",
+    ]:
+        el = page.query_selector(confirm_sel)
+        if el and el.is_visible():
+            el.click()
+            page.wait_for_timeout(400)
+            return
+
+
+def add_ingredients(page: Page, count: int = 2):
+    """Click '+' once per ingredient — the dialog closes after each selection."""
+    for i in range(1, count + 1):
+        _pick_ingredient(page, i)
+        page.wait_for_timeout(500)
+
+
+# ─── step 6: prompt ────────────────────────────────────────────────────────────
 
 def enter_prompt(page: Page, prompt: str):
-    """Fill the prompt textarea."""
-    for sel in [
-        "textarea",
-        "[contenteditable='true']",
-        "[placeholder*='prompt' i]",
-        "[placeholder*='mô tả' i]",
-        "[aria-label*='prompt' i]",
-    ]:
+    for sel in ["textarea", "[contenteditable='true']",
+                "[placeholder*='prompt' i]", "[placeholder*='mô tả' i]",
+                "[aria-label*='prompt' i]"]:
         el = page.query_selector(sel)
         if not el:
             continue
         try:
-            # Scroll into view first, then fill without requiring a click
             el.scroll_into_view_if_needed()
             el.fill(prompt)
             print("  Prompt entered")
             return
         except Exception:
             try:
-                # Force-type via JS as last resort
-                el.evaluate(f"e => {{ e.value = {repr(prompt)}; e.dispatchEvent(new Event('input', {{bubbles:true}})); }}")
+                el.evaluate(
+                    f"e => {{ e.value = {repr(prompt)}; "
+                    "e.dispatchEvent(new Event('input', {bubbles:true})); }}"
+                )
                 print("  Prompt entered (via JS)")
                 return
             except Exception:
@@ -199,71 +263,15 @@ def enter_prompt(page: Page, prompt: str):
     print("  Warning: prompt field not found.")
 
 
-def add_images_as_ingredients(page: Page, count: int = 2):
-    """
-    Click the '+' (add_2) button to open the media-picker dialog,
-    then select the first `count` uploaded images as model ingredients.
-    """
-    # Click the '+' / Create button (add_2 icon, aria-haspopup=dialog)
-    _click(
-        page,
-        "button[aria-haspopup='dialog']:has(i:has-text('add_2'))",
-        "+ (add ingredients) button",
-    )
-
-    # Wait for the picker dialog to open
-    page.wait_for_selector("[role='dialog'], [data-state='open']",
-                           state="visible", timeout=10_000)
-    page.wait_for_timeout(800)
-
-    # Re-query thumbnails after each click — dialog re-renders on selection
-    thumb_sel = (
-        "[role='dialog'] img, "
-        "[data-state='open'] img, "
-        "[role='dialog'] [role='checkbox'], "
-        "[role='dialog'] [role='option']"
-    )
-
-    for i in range(count):
-        # Fresh query every iteration so references are never stale
-        thumbs = [t for t in page.query_selector_all(thumb_sel) if t.is_visible()]
-        if not thumbs:
-            raise RuntimeError(f"No image thumbnails found in picker (selecting image {i+1}).")
-        # Click the next unselected thumbnail (index i, or always [0] if list shrinks)
-        idx = min(i, len(thumbs) - 1)
-        thumbs[idx].scroll_into_view_if_needed()
-        thumbs[idx].click()
-        print(f"  Selected image {i + 1} as ingredient")
-        page.wait_for_timeout(600)
-
-    # Confirm / close the dialog — look for a confirm/done button
-    for confirm_sel in [
-        "button:has-text('Done')",
-        "button:has-text('Xong')",
-        "button:has-text('Confirm')",
-        "button:has-text('Add')",
-        "button:has-text('Select')",
-        "button:has-text('Thêm')",
-        "[role='dialog'] button[type='submit']",
-    ]:
-        el = page.query_selector(confirm_sel)
-        if el and el.is_visible():
-            el.click()
-            print(f"  Confirmed selection ({confirm_sel})")
-            page.wait_for_timeout(800)
-            return
-
-    # No confirm button — dialog may close on selection
-    print("  No confirm button found — assuming dialog closed on selection.")
-
+# ─── step 7: generate ──────────────────────────────────────────────────────────
 
 def click_generate(page: Page):
-    """Click the arrow_forward generate button."""
-    _click(
-        page,
+    el = page.wait_for_selector(
         "button:has(i:has-text('arrow_forward'))",
-        "Generate (arrow_forward)",
+        state="visible", timeout=DEFAULT_TIMEOUT,
     )
+    el.click()
+    print("  Generate clicked")
 
 
 def wait_for_video(page: Page) -> str:
@@ -289,13 +297,19 @@ def wait_for_video(page: Page) -> str:
 
 def debug_page(page: Page, label: str = "screenshot"):
     shot = Path(f"debug_{label}.png")
-    page.screenshot(path=str(shot))
+    page.screenshot(path=str(shot), full_page=True)
     print(f"\n[DEBUG] Screenshot: {shot.resolve()}")
-    buttons = [b for b in page.query_selector_all("button, [role='button'], [role='tab']") if b.is_visible()]
-    print(f"  Visible buttons/tabs: {len(buttons)}")
-    for i, b in enumerate(buttons):
+    els = page.query_selector_all(
+        "button, [role='button'], [role='tab'], [role='menuitem']"
+    )
+    visible = [e for e in els if e.is_visible()]
+    print(f"  Visible interactive elements: {len(visible)}")
+    for i, e in enumerate(visible):
         try:
-            txt = b.evaluate("e => (e.innerText||e.getAttribute('aria-label')||'').slice(0,80).trim()")
+            txt = e.evaluate(
+                "e => [e.tagName, e.getAttribute('role'), e.getAttribute('aria-controls'),"
+                " (e.innerText||'').slice(0,60)].filter(Boolean).join(' | ')"
+            )
             print(f"    [{i}] {txt}")
         except Exception:
             pass
@@ -309,10 +323,8 @@ def login():
     with sync_playwright() as p:
         context = _launch_context(p, headless=False)
         page = context.new_page()
-        print("[1] Opening labs.google/flow/about ...")
         page.goto(FLOW_ABOUT_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT)
         page.wait_for_timeout(2000)
-        print("[2] Click 'Create with Flow' in the browser (or it may click automatically)...")
         try:
             el = page.wait_for_selector(
                 "a:has-text('Create with Flow'), button:has-text('Create with Flow')",
@@ -320,14 +332,13 @@ def login():
             )
             el.click()
         except Exception:
-            print("  Button not found — please click it manually.")
+            print("  'Create with Flow' not found — click it manually.")
         page.wait_for_timeout(1500)
         _accept_tos(page)
-        print("[3] Please sign in to Google in the browser window...")
+        print("Please sign in to Google in the browser window...")
         try:
             page.wait_for_url("**/tools/flow**", timeout=SIGN_IN_TIMEOUT)
             print("\nLogin complete! Session saved.")
-            print("Run: python auto_flow.py --begin img1.jpg --end img2.jpg --prompt 'your prompt'")
         except Exception:
             print("\nTimed out. Session saved as-is.")
         finally:
@@ -373,20 +384,23 @@ def run(begin_image: str, end_image: str, prompt: str,
             debug_page(page, "after_upload")
 
         print("[5] Opening settings panel...")
-        click_settings_button(page)
+        open_settings_panel(page)
 
-        print("[6] Configuring generation settings...")
+        if debug:
+            debug_page(page, "after_settings")
+
+        print("[6] Configuring: Video → Ingredients → 9:16 → x1...")
         select_video_tab(page)
         select_ingredients_tab(page)
-        select_ratio_9_16(page)
-        select_x1_scale(page)
+        select_9_16_tab(page)
+        select_x1_tab(page)
 
-        print("[7] Entering prompt...")
+        print("[7] Adding images as ingredients...")
+        add_ingredients(page, count=2)
+
+        print("[8] Entering prompt...")
         enter_prompt(page, prompt)
         page.wait_for_timeout(500)
-
-        print("[8] Adding uploaded images as ingredients...")
-        add_images_as_ingredients(page, count=2)
 
         print("[9] Generating video...")
         click_generate(page)
@@ -406,18 +420,18 @@ def run(begin_image: str, end_image: str, prompt: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Upload begin/end images to Google Labs Flow and generate a video"
+        description="Upload images to Google Labs Flow and generate a video"
     )
     parser.add_argument("--login",    action="store_true",
                         help="One-time Google sign-in (saves session)")
     parser.add_argument("--begin",   help="Path to the BEGIN (start) frame image")
     parser.add_argument("--end",     help="Path to the END (finish) frame image")
-    parser.add_argument("--prompt",  required=False, default="",
-                        help="Text prompt for video generation (required by Flow)")
+    parser.add_argument("--prompt",  default="",
+                        help="Text prompt for video generation")
     parser.add_argument("--headless", action="store_true",
                         help="Run without a visible browser window")
     parser.add_argument("--debug",   action="store_true",
-                        help="Save screenshots and dump page elements for debugging")
+                        help="Save screenshots and dump elements for debugging")
     args = parser.parse_args()
 
     if args.login:
@@ -426,7 +440,7 @@ def main():
         if not args.begin or not args.end:
             parser.error("--begin and --end are required (or use --login for first-time setup)")
         if not args.prompt:
-            parser.error("--prompt is required (Google Flow needs a text prompt to generate video)")
+            parser.error("--prompt is required")
         run(args.begin, args.end, args.prompt, args.headless, args.debug)
 
 
